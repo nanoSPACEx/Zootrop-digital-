@@ -52,7 +52,7 @@ export const ZoetropePlayer: React.FC<ZoetropePlayerProps> = ({
     return () => clearInterval(intervalId);
   }, [isPlaying, settings.fps, settings.frameCount]);
 
-  // Helper to draw a specific frame to a context
+  // Helper to draw a specific frame to a context, supporting multiple strips
   const drawFrameToContext = (
     ctx: CanvasRenderingContext2D, 
     img: HTMLImageElement, 
@@ -60,32 +60,69 @@ export const ZoetropePlayer: React.FC<ZoetropePlayerProps> = ({
     targetWidth: number,
     targetHeight: number
   ) => {
-    let sourceX, sourceY, sliceWidth, sliceHeight;
-
-    if (settings.orientation === Orientation.VERTICAL) {
-      sliceWidth = img.width;
-      sliceHeight = img.height / settings.frameCount;
-      sourceX = 0;
-      sourceY = frameIndex * sliceHeight;
-    } else {
-      sliceWidth = img.width / settings.frameCount;
-      sliceHeight = img.height;
-      sourceX = frameIndex * sliceWidth;
-      sourceY = 0;
-    }
-
+    const numStrips = settings.numStrips || 1;
     ctx.clearRect(0, 0, targetWidth, targetHeight);
-    ctx.drawImage(
-      img,
-      sourceX,
-      sourceY,
-      sliceWidth,
-      sliceHeight,
-      0,
-      0,
-      targetWidth,
-      targetHeight
-    );
+
+    // Loop through each strip to compose the frame
+    for (let s = 0; s < numStrips; s++) {
+      let sourceX, sourceY, sourceW, sourceH;
+      let destX, destY, destW, destH;
+
+      if (settings.orientation === Orientation.VERTICAL) {
+        // Vertical Strip (Tall image):
+        // Image is split vertically into columns (strips).
+        // Each column is split vertically into frames.
+        
+        const stripTotalWidth = img.width / numStrips;
+        const frameHeight = img.height / settings.frameCount;
+
+        // Source: Logic for picking the frame from the specific strip column
+        sourceX = s * stripTotalWidth;
+        sourceY = frameIndex * frameHeight;
+        sourceW = stripTotalWidth;
+        sourceH = frameHeight;
+
+        // Destination: Logic for placing the strip in the final canvas
+        // If multiple strips, they are placed side-by-side in the output
+        destX = (s * targetWidth) / numStrips;
+        destY = 0;
+        destW = targetWidth / numStrips;
+        destH = targetHeight;
+
+      } else {
+        // Horizontal Strip (Wide image):
+        // Image is split horizontally into rows (strips).
+        // Each row is split horizontally into frames.
+        
+        const stripTotalHeight = img.height / numStrips;
+        const frameWidth = img.width / settings.frameCount;
+
+        // Source
+        sourceX = frameIndex * frameWidth;
+        sourceY = s * stripTotalHeight;
+        sourceW = frameWidth;
+        sourceH = stripTotalHeight;
+
+        // Destination
+        // If multiple strips, they are placed stacked top-to-bottom in the output
+        destX = 0;
+        destY = (s * targetHeight) / numStrips;
+        destW = targetWidth;
+        destH = targetHeight / numStrips;
+      }
+
+      ctx.drawImage(
+        img,
+        sourceX,
+        sourceY,
+        sourceW,
+        sourceH,
+        destX,
+        destY,
+        destW,
+        destH
+      );
+    }
   };
 
   // Draw Frame to Screen
@@ -93,23 +130,28 @@ export const ZoetropePlayer: React.FC<ZoetropePlayerProps> = ({
     const canvas = canvasRef.current;
     const ctx = canvas?.getContext('2d');
     const img = imgElementRef.current;
-
+    
     if (!canvas || !ctx || !img) return;
 
-    // Calculate dimensions
-    let sliceWidth, sliceHeight;
+    // Calculate dimensions of the VIEWPORT (the single composed frame)
+    let viewWidth, viewHeight;
+
     if (settings.orientation === Orientation.VERTICAL) {
-      sliceWidth = img.width;
-      sliceHeight = img.height / settings.frameCount;
+        // View Width = Full image width (all strips side-by-side)
+        // View Height = Height of a single frame
+        viewWidth = img.width; 
+        viewHeight = img.height / settings.frameCount;
     } else {
-      sliceWidth = img.width / settings.frameCount;
-      sliceHeight = img.height;
+        // View Width = Width of a single frame
+        // View Height = Full image height (all strips stacked)
+        viewWidth = img.width / settings.frameCount;
+        viewHeight = img.height;
     }
 
-    canvas.width = sliceWidth;
-    canvas.height = sliceHeight;
+    canvas.width = viewWidth;
+    canvas.height = viewHeight;
 
-    drawFrameToContext(ctx, img, currentFrame, sliceWidth, sliceHeight);
+    drawFrameToContext(ctx, img, currentFrame, viewWidth, viewHeight);
 
   }, [currentFrame, imageState, settings]);
 

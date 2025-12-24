@@ -23,6 +23,7 @@ const App: React.FC = () => {
     frameCount: 12,
     fps: 12,
     orientation: Orientation.VERTICAL,
+    numStrips: 1, // Default to single strip
   });
 
   const handleImageSelected = (file: File) => {
@@ -41,16 +42,19 @@ const App: React.FC = () => {
         const width = img.width;
         const height = img.height;
         
-        // Recalculate orientation based on the CROPPED image
+        // Recalculate orientation based on the CROPPED image dimensions
+        // Rules: 
+        // 1. If height > 150% of width -> Vertical
+        // 2. If width > 150% of height -> Horizontal
+        // 3. Otherwise -> Keep current/default setting
         let newOrientation = settings.orientation;
         
-        if (height > 1.5 * width) {
+        if (height > width * 1.5) {
             newOrientation = Orientation.VERTICAL;
         } 
-        else if (width > 1.5 * height) {
+        else if (width > height * 1.5) {
             newOrientation = Orientation.HORIZONTAL;
         }
-        // else keep default/previous
 
         setSettings(prev => ({ ...prev, orientation: newOrientation }));
         setImageState({
