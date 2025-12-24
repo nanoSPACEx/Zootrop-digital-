@@ -1,12 +1,21 @@
 import React, { useState } from 'react';
 import { Header } from './components/Header';
 import { UploadZone } from './components/UploadZone';
+import { ImageCropper } from './components/ImageCropper';
 import { Controls } from './components/Controls';
 import { ZoetropePlayer } from './components/ZoetropePlayer';
 import { EducationTip } from './components/EducationTip';
 import { ZoetropeSettings, Orientation, ImageState } from './types';
 
+enum AppMode {
+  UPLOAD = 'UPLOAD',
+  CROP = 'CROP',
+  PLAY = 'PLAY'
+}
+
 const App: React.FC = () => {
+  const [mode, setMode] = useState<AppMode>(AppMode.UPLOAD);
+  const [rawImageSrc, setRawImageSrc] = useState<string | null>(null);
   const [imageState, setImageState] = useState<ImageState | null>(null);
   
   // Default settings
@@ -20,34 +29,43 @@ const App: React.FC = () => {
     const reader = new FileReader();
     reader.onload = (e) => {
       const result = e.target?.result as string;
+      setRawImageSrc(result);
+      setMode(AppMode.CROP);
+    };
+    reader.readAsDataURL(file);
+  };
+
+  const handleCropComplete = (croppedImageSrc: string) => {
       const img = new Image();
       img.onload = () => {
         const width = img.width;
         const height = img.height;
         
-        // Detecció robusta de l'orientació basada en les dimensions de la imatge
+        // Recalculate orientation based on the CROPPED image
         let newOrientation = settings.orientation;
         
-        // Si l'alçada és més del doble que l'amplada, és clarament una tira vertical
-        if (height > 2 * width) {
+        if (height > 1.5 * width) {
             newOrientation = Orientation.VERTICAL;
         } 
-        // Si l'amplada és més del doble que l'alçada, és clarament una tira horitzontal
-        else if (width > 2 * height) {
+        else if (width > 1.5 * height) {
             newOrientation = Orientation.HORIZONTAL;
         }
-        // Si no compleix cap de les condicions (p.ex. quadrat), mantenim l'orientació anterior
+        // else keep default/previous
 
         setSettings(prev => ({ ...prev, orientation: newOrientation }));
         setImageState({
-          src: result,
+          src: croppedImageSrc,
           width: width,
           height: height,
         });
+        setMode(AppMode.PLAY);
       };
-      img.src = result;
-    };
-    reader.readAsDataURL(file);
+      img.src = croppedImageSrc;
+  };
+
+  const handleCancelCrop = () => {
+    setRawImageSrc(null);
+    setMode(AppMode.UPLOAD);
   };
 
   const updateSettings = (newSettings: Partial<ZoetropeSettings>) => {
@@ -56,6 +74,8 @@ const App: React.FC = () => {
 
   const handleReset = () => {
     setImageState(null);
+    setRawImageSrc(null);
+    setMode(AppMode.UPLOAD);
   };
 
   return (
@@ -64,18 +84,27 @@ const App: React.FC = () => {
         <Header />
 
         <main className="transition-all duration-500 ease-in-out">
-          {!imageState ? (
+          {mode === AppMode.UPLOAD && (
             <div className="animate-fade-in-up">
               <UploadZone onImageSelected={handleImageSelected} />
               
-              {/* Example/Instructional placeholder if needed */}
               <div className="mt-12 text-center">
                  <p className="text-slate-600 text-sm">
                    Ideal per a classes de plàstica i tecnologia.
                  </p>
               </div>
             </div>
-          ) : (
+          )}
+
+          {mode === AppMode.CROP && rawImageSrc && (
+             <ImageCropper 
+                imageSrc={rawImageSrc} 
+                onCropComplete={handleCropComplete} 
+                onCancel={handleCancelCrop} 
+             />
+          )}
+
+          {mode === AppMode.PLAY && imageState && (
             <div className="space-y-8 animate-fade-in">
               <ZoetropePlayer 
                 imageState={imageState} 
@@ -95,7 +124,7 @@ const App: React.FC = () => {
       </div>
       
       {/* Footer */}
-      <footer className="fixed bottom-0 left-0 w-full py-2 bg-slate-950/80 backdrop-blur-sm border-t border-slate-800 text-center text-slate-600 text-xs">
+      <footer className="fixed bottom-0 left-0 w-full py-2 bg-slate-950/80 backdrop-blur-sm border-t border-slate-800 text-center text-slate-600 text-xs z-30">
         <p>Creat per a l'aprenentatge híbrid • Art i Tecnologia</p>
       </footer>
     </div>

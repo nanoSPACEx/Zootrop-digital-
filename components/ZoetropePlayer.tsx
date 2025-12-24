@@ -1,6 +1,7 @@
 import React, { useEffect, useRef, useState } from 'react';
-import { Play, Pause, RefreshCw } from 'lucide-react';
+import { Play, Pause, RefreshCw, ZoomIn, ZoomOut, RotateCw, RotateCcw, Maximize, Download } from 'lucide-react';
 import { ZoetropeSettings, ImageState, Orientation } from '../types';
+import { GIFEncoder, quantize, applyPalette } from 'gifenc';
 
 interface ZoetropePlayerProps {
   imageState: ImageState;
@@ -15,11 +16,23 @@ export const ZoetropePlayer: React.FC<ZoetropePlayerProps> = ({
 }) => {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
+  const imgElementRef = useRef<HTMLImageElement | null>(null);
+
+  // Animation State
   const [isPlaying, setIsPlaying] = useState(true);
   const [currentFrame, setCurrentFrame] = useState(0);
-  
-  // Ref for the source image element
-  const imgElementRef = useRef<HTMLImageElement | null>(null);
+  const [isExporting, setIsExporting] = useState(false);
+
+  // Viewport State (Zoom, Pan, Rotate)
+  const [viewState, setViewState] = useState({
+    scale: 1,
+    rotation: 0,
+    x: 0,
+    y: 0,
+  });
+  const [isDragging, setIsDragging] = useState(false);
+  const dragStartRef = useRef({ x: 0, y: 0 });
+  const lastTouchRef = useRef<number>(0); // For pinch detection
 
   // Initialize Image Element
   useEffect(() => {
@@ -33,48 +46,35 @@ export const ZoetropePlayer: React.FC<ZoetropePlayerProps> = ({
   // Animation Loop
   useEffect(() => {
     if (!isPlaying) return;
-
     const intervalId = setInterval(() => {
       setCurrentFrame((prev) => (prev + 1) % settings.frameCount);
     }, 1000 / settings.fps);
-
     return () => clearInterval(intervalId);
   }, [isPlaying, settings.fps, settings.frameCount]);
 
-  // Draw Frame
-  useEffect(() => {
-    const canvas = canvasRef.current;
-    const ctx = canvas?.getContext('2d');
-    const img = imgElementRef.current;
-
-    if (!canvas || !ctx || !img || !containerRef.current) return;
-
-    // Determine slice dimensions based on source image and settings
+  // Helper to draw a specific frame to a context
+  const drawFrameToContext = (
+    ctx: CanvasRenderingContext2D, 
+    img: HTMLImageElement, 
+    frameIndex: number,
+    targetWidth: number,
+    targetHeight: number
+  ) => {
     let sourceX, sourceY, sliceWidth, sliceHeight;
 
     if (settings.orientation === Orientation.VERTICAL) {
-      // Vertical Strip: Height is divided by frames
       sliceWidth = img.width;
       sliceHeight = img.height / settings.frameCount;
       sourceX = 0;
-      sourceY = currentFrame * sliceHeight;
+      sourceY = frameIndex * sliceHeight;
     } else {
-      // Horizontal Strip: Width is divided by frames
       sliceWidth = img.width / settings.frameCount;
       sliceHeight = img.height;
-      sourceX = currentFrame * sliceWidth;
+      sourceX = frameIndex * sliceWidth;
       sourceY = 0;
     }
 
-    // Set canvas internal resolution to match the slice high quality
-    canvas.width = sliceWidth;
-    canvas.height = sliceHeight;
-
-    // Clear and Draw
-    ctx.clearRect(0, 0, canvas.width, canvas.height);
-    
-    // Draw the specific slice
-    // drawImage(image, sx, sy, sWidth, sHeight, dx, dy, dWidth, dHeight)
+    ctx.clearRect(0, 0, targetWidth, targetHeight);
     ctx.drawImage(
       img,
       sourceX,
@@ -83,35 +83,290 @@ export const ZoetropePlayer: React.FC<ZoetropePlayerProps> = ({
       sliceHeight,
       0,
       0,
-      canvas.width,
-      canvas.height
+      targetWidth,
+      targetHeight
     );
+  };
+
+  // Draw Frame to Screen
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    const ctx = canvas?.getContext('2d');
+    const img = imgElementRef.current;
+
+    if (!canvas || !ctx || !img) return;
+
+    // Calculate dimensions
+    let sliceWidth, sliceHeight;
+    if (settings.orientation === Orientation.VERTICAL) {
+      sliceWidth = img.width;
+      sliceHeight = img.height / settings.frameCount;
+    } else {
+      sliceWidth = img.width / settings.frameCount;
+      sliceHeight = img.height;
+    }
+
+    canvas.width = sliceWidth;
+    canvas.height = sliceHeight;
+
+    drawFrameToContext(ctx, img, currentFrame, sliceWidth, sliceHeight);
 
   }, [currentFrame, imageState, settings]);
 
+  // --- GIF Export Logic ---
+  const handleExportGif = async () => {
+    const img = imgElementRef.current;
+    if (!img || isExporting) return;
+
+    setIsExporting(true);
+    setIsPlaying(false);
+
+    try {
+      // Create encoder
+      const encoder = new GIFEncoder();
+      
+      // Determine dimensions
+      let width, height;
+      if (settings.orientation === Orientation.VERTICAL) {
+        width = img.width;
+        height = img.height / settings.frameCount;
+      } else {
+        width = img.width / settings.frameCount;
+        height = img.height;
+      }
+      
+      // Limit resolution for GIF performance/size if huge
+      const MAX_DIM = 500;
+      let scale = 1;
+      if (width > MAX_DIM || height > MAX_DIM) {
+        scale = Math.min(MAX_DIM / width, MAX_DIM / height);
+        width = Math.round(width * scale);
+        height = Math.round(height * scale);
+      }
+
+      // Create a temp canvas
+      const canvas = document.createElement('canvas');
+      canvas.width = width;
+      canvas.height = height;
+      const ctx = canvas.getContext('2d', { willReadFrequently: true });
+      
+      if (!ctx) throw new Error("Could not create canvas context");
+
+      // Loop through all frames
+      const delay = 1000 / settings.fps;
+      
+      for (let i = 0; i < settings.frameCount; i++) {
+        // Draw frame to temp canvas
+        drawFrameToContext(ctx, img, i, width, height);
+        
+        // Get image data
+        const { data } = ctx.getImageData(0, 0, width, height);
+        
+        // Quantize colors (gifenc requires this)
+        const palette = quantize(data, 256);
+        const index = applyPalette(data, palette);
+        
+        // Add frame
+        encoder.writeFrame(index, width, height, { palette, delay });
+        
+        // Allow UI to update
+        await new Promise(r => setTimeout(r, 0));
+      }
+
+      encoder.finish();
+      const buffer = encoder.bytes();
+      
+      // Download
+      const blob = new Blob([buffer], { type: 'image/gif' });
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      link.href = url;
+      link.download = `zootrop_${Date.now()}.gif`;
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
+      
+    } catch (e) {
+      console.error("Error creating GIF", e);
+      alert("Error creant el GIF.");
+    } finally {
+      setIsExporting(false);
+      setIsPlaying(true);
+    }
+  };
+
+
+  // --- Viewport Interaction Handlers ---
+
+  const handleWheel = (e: React.WheelEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+
+    // Shift + Wheel = Rotate
+    if (e.shiftKey) {
+      const delta = Math.sign(e.deltaY) * 5;
+      setViewState(prev => ({ ...prev, rotation: prev.rotation + delta }));
+      return;
+    }
+
+    // Normal Wheel = Zoom
+    const scaleFactor = -e.deltaY * 0.001;
+    setViewState(prev => ({
+      ...prev,
+      scale: Math.min(Math.max(0.1, prev.scale + scaleFactor), 5)
+    }));
+  };
+
+  const handleMouseDown = (e: React.MouseEvent) => {
+    setIsDragging(true);
+    dragStartRef.current = { x: e.clientX - viewState.x, y: e.clientY - viewState.y };
+  };
+
+  const handleMouseMove = (e: React.MouseEvent) => {
+    if (!isDragging) return;
+    setViewState(prev => ({
+      ...prev,
+      x: e.clientX - dragStartRef.current.x,
+      y: e.clientY - dragStartRef.current.y
+    }));
+  };
+
+  const handleMouseUp = () => setIsDragging(false);
+
+  // Touch Handlers for Pinch Zoom & Pan
+  const handleTouchStart = (e: React.TouchEvent) => {
+    if (e.touches.length === 1) {
+      setIsDragging(true);
+      dragStartRef.current = { 
+        x: e.touches[0].clientX - viewState.x, 
+        y: e.touches[0].clientY - viewState.y 
+      };
+    } else if (e.touches.length === 2) {
+      // Pinch start
+      const dist = Math.hypot(
+        e.touches[0].clientX - e.touches[1].clientX,
+        e.touches[0].clientY - e.touches[1].clientY
+      );
+      lastTouchRef.current = dist;
+    }
+  };
+
+  const handleTouchMove = (e: React.TouchEvent) => {
+    e.preventDefault(); // Prevent scrolling page
+    if (e.touches.length === 1 && isDragging) {
+      setViewState(prev => ({
+        ...prev,
+        x: e.touches[0].clientX - dragStartRef.current.x,
+        y: e.touches[0].clientY - dragStartRef.current.y
+      }));
+    } else if (e.touches.length === 2) {
+      // Pinch move
+      const dist = Math.hypot(
+        e.touches[0].clientX - e.touches[1].clientX,
+        e.touches[0].clientY - e.touches[1].clientY
+      );
+      const delta = dist - lastTouchRef.current;
+      const zoomSpeed = 0.005;
+      
+      setViewState(prev => ({
+        ...prev,
+        scale: Math.min(Math.max(0.1, prev.scale + (delta * zoomSpeed)), 5)
+      }));
+      lastTouchRef.current = dist;
+    }
+  };
+
+  const handleTouchEnd = () => setIsDragging(false);
+
+  // Helper controls
+  const rotateView = (deg: number) => {
+    setViewState(prev => ({ ...prev, rotation: prev.rotation + deg }));
+  };
+  
+  const resetView = () => {
+    setViewState({ scale: 1, rotation: 0, x: 0, y: 0 });
+  };
+
+  const zoomView = (delta: number) => {
+    setViewState(prev => ({ 
+      ...prev, 
+      scale: Math.min(Math.max(0.1, prev.scale + delta), 5) 
+    }));
+  };
+
   return (
     <div className="flex flex-col items-center w-full max-w-4xl mx-auto animate-fade-in">
+      
       {/* Stage Container */}
       <div 
-        className="relative w-full aspect-square md:aspect-video bg-black rounded-2xl border-4 border-slate-800 shadow-2xl overflow-hidden flex items-center justify-center mb-6 ring-1 ring-slate-700/50"
+        className="relative w-full aspect-square md:aspect-video bg-black rounded-2xl border-4 border-slate-800 shadow-2xl overflow-hidden flex items-center justify-center mb-6 ring-1 ring-slate-700/50 cursor-move group"
         ref={containerRef}
+        onWheel={handleWheel}
+        onMouseDown={handleMouseDown}
+        onMouseMove={handleMouseMove}
+        onMouseUp={handleMouseUp}
+        onMouseLeave={handleMouseUp}
+        onTouchStart={handleTouchStart}
+        onTouchMove={handleTouchMove}
+        onTouchEnd={handleTouchEnd}
       >
-        {/* The Animated Canvas */}
+        {/* Background Grid for better spatial awareness when panning */}
+        <div className="absolute inset-0 opacity-10 pointer-events-none" 
+             style={{ backgroundImage: 'radial-gradient(#4f46e5 1px, transparent 1px)', backgroundSize: '20px 20px' }}>
+        </div>
+
+        {/* The Animated Canvas with CSS Transform */}
         <canvas
           ref={canvasRef}
-          className="max-w-full max-h-full object-contain filter drop-shadow-[0_0_10px_rgba(255,255,255,0.1)]"
+          className="max-w-none origin-center transition-transform duration-75 ease-out filter drop-shadow-[0_0_10px_rgba(255,255,255,0.1)]"
+          style={{
+            transform: `translate(${viewState.x}px, ${viewState.y}px) scale(${viewState.scale}) rotate(${viewState.rotation}deg)`
+          }}
         />
 
+        {/* Overlay for Exporting */}
+        {isExporting && (
+            <div className="absolute inset-0 bg-black/80 flex flex-col items-center justify-center z-20">
+                <div className="animate-spin rounded-full h-10 w-10 border-b-2 border-indigo-500 mb-2"></div>
+                <span className="text-white font-medium">Generant GIF...</span>
+            </div>
+        )}
+
+        {/* Floating Toolbar (Moved inside for better UX) */}
+        <div 
+            className="absolute bottom-4 left-1/2 -translate-x-1/2 flex items-center gap-1 p-1.5 rounded-full bg-slate-900/80 backdrop-blur border border-white/10 shadow-lg z-20 transition-opacity duration-300 opacity-0 group-hover:opacity-100"
+            onMouseDown={(e) => e.stopPropagation()}
+            onTouchStart={(e) => e.stopPropagation()}
+        >
+          <button onClick={() => zoomView(-0.1)} className="p-2 hover:bg-white/10 rounded-full text-slate-300 hover:text-white transition-colors" title="Allunyar">
+            <ZoomOut className="w-4 h-4" />
+          </button>
+          <button onClick={resetView} className="p-2 hover:bg-white/10 rounded-full text-slate-300 hover:text-white transition-colors" title="Restablir Vista">
+            <Maximize className="w-4 h-4" />
+          </button>
+          <button onClick={() => zoomView(0.1)} className="p-2 hover:bg-white/10 rounded-full text-slate-300 hover:text-white transition-colors" title="Apropar">
+            <ZoomIn className="w-4 h-4" />
+          </button>
+          <div className="w-px h-4 bg-white/20 mx-1"></div>
+          <button onClick={() => rotateView(-90)} className="p-2 hover:bg-white/10 rounded-full text-slate-300 hover:text-white transition-colors" title="Girar Esquerra">
+            <RotateCcw className="w-4 h-4" />
+          </button>
+          <button onClick={() => rotateView(90)} className="p-2 hover:bg-white/10 rounded-full text-slate-300 hover:text-white transition-colors" title="Girar Dreta">
+            <RotateCw className="w-4 h-4" />
+          </button>
+        </div>
+
         {/* Frame Counter Badge */}
-        <div className="absolute top-4 right-4 bg-black/50 backdrop-blur-md px-3 py-1 rounded-full border border-white/10 text-xs font-mono text-slate-400">
+        <div className="absolute top-4 right-4 bg-black/50 backdrop-blur-md px-3 py-1 rounded-full border border-white/10 text-xs font-mono text-slate-400 pointer-events-none select-none z-10">
           FRAME: {currentFrame + 1}/{settings.frameCount}
         </div>
       </div>
 
       {/* Playback Controls */}
-      <div className="flex gap-4 mb-8">
+      <div className="flex flex-wrap items-center justify-center gap-4 mb-8">
         <button
           onClick={() => setIsPlaying(!isPlaying)}
+          disabled={isExporting}
           className={`flex items-center gap-2 px-8 py-3 rounded-full font-bold text-lg transition-all transform hover:scale-105 active:scale-95 ${
             isPlaying
               ? 'bg-amber-500 hover:bg-amber-400 text-amber-950 shadow-[0_0_20px_rgba(245,158,11,0.3)]'
@@ -130,7 +385,17 @@ export const ZoetropePlayer: React.FC<ZoetropePlayerProps> = ({
         </button>
 
         <button
+          onClick={handleExportGif}
+          disabled={isExporting}
+          className="flex items-center gap-2 px-6 py-3 rounded-full bg-indigo-600 hover:bg-indigo-500 text-white font-medium border border-indigo-500 shadow-[0_0_15px_rgba(79,70,229,0.2)] transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+        >
+          <Download className="w-5 h-5" />
+          GIF
+        </button>
+
+        <button
           onClick={onReset}
+          disabled={isExporting}
           className="flex items-center gap-2 px-6 py-3 rounded-full bg-slate-800 hover:bg-slate-700 text-slate-300 font-medium border border-slate-700 transition-colors"
         >
           <RefreshCw className="w-5 h-5" />
